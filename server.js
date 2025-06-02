@@ -1,16 +1,17 @@
-// server.js
+require('dotenv').config();
 const express = require('express');
 const midtransClient = require('midtrans-client');
 const cors = require('cors');
-const crypto = require('crypto');
-require('dotenv').config();
+const bodyParser = require('body-parser');
+const morgan = require('morgan');
 
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(morgan('dev'));
 
 // Midtrans configuration
 const snap = new midtransClient.Snap({
@@ -19,34 +20,42 @@ const snap = new midtransClient.Snap({
     clientKey: process.env.MIDTRANS_CLIENT_KEY
 });
 
-// Core API untuk transaksi yang lebih advance
-const coreApi = new midtransClient.CoreApi({
-    isProduction: process.env.NODE_ENV === 'production',
-    serverKey: process.env.MIDTRANS_SERVER_KEY,
-    clientKey: process.env.MIDTRANS_CLIENT_KEY
-});
+// Helper functions
+const generateOrderId = () => `LY-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-// Generate order ID
-function generateOrderId() {
-    return 'ORDER-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-}
-
-// Endpoint untuk membuat transaksi (Snap Token)
+// API Endpoints
 app.post('/api/payment/create', async (req, res) => {
     try {
-        const { amount, customerDetails, itemDetails, customExpiry } = req.body;
+        const { amount, customerDetails, itemDetails } = req.body;
 
-        // Validasi input
+        // Validate request
         if (!amount || !customerDetails || !itemDetails) {
             return res.status(400).json({
                 success: false,
-                message: 'Missing required fields: amount, customerDetails, itemDetails'
+                message: 'Missing required fields: amount, customerDetails, itemDetails',
+                data: null
+            });
+        }
+
+        if (!customerDetails.first_name || !customerDetails.phone) {
+            return res.status(400).json({
+                success: false,
+                message: 'Customer details must include first_name and phone',
+                data: null
+            });
+        }
+
+        if (!Array.isArray(itemDetails) || itemDetails.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Item details must be a non-empty array',
+                data: null
             });
         }
 
         const orderId = generateOrderId();
         
-        const parameter = {
+        const parameters = {
             transaction_details: {
                 order_id: orderId,
                 gross_amount: amount
@@ -57,21 +66,17 @@ app.post('/api/payment/create', async (req, res) => {
             customer_details: customerDetails,
             item_details: itemDetails,
             callbacks: {
-                finish: `${process.env.BASE_URL}/payment-success`,
-                error: `${process.env.BASE_URL}/payment-error`,
-                pending: `${process.env.BASE_URL}/payment-pending`
+                finish: `${process.env.BASE_URL}/payment/finish`,
+                error: `${process.env.BASE_URL}/payment/error`,
+                pending: `${process.env.BASE_URL}/payment/pending`
             }
         };
 
-        // Custom expiry jika diperlukan
-        if (customExpiry) {
-            parameter.custom_expiry = customExpiry;
-        }
-
-        const transaction = await snap.createTransaction(parameter);
+        const transaction = await snap.createTransaction(parameters);
         
         res.json({
             success: true,
+            message: 'Transaction created successfully',
             data: {
                 token: transaction.token,
                 redirect_url: transaction.redirect_url,
@@ -80,199 +85,91 @@ app.post('/api/payment/create', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Create transaction error:', error);
+        console.error('Transaction error:', error);
         res.status(500).json({
             success: false,
             message: 'Failed to create transaction',
-            error: error.message
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            data: null
         });
     }
 });
 
-// Endpoint untuk cek status transaksi
-app.get('/api/payment/status/:orderId', async (req, res) => {
+app.get('/api/payment/status', async (req, res) => {
     try {
-        const { orderId } = req.params;
+        const { order_id } = req.query;
         
-        const statusResponse = await coreApi.transaction.status(orderId);
-        
-        res.json({
-            success: true,
-            data: statusResponse
-        });
-
-    } catch (error) {
-        console.error('Check status error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to check transaction status',
-            error: error.message
-        });
-    }
-});
-
-// Webhook untuk notifikasi dari Midtrans
-app.post('/api/payment/notification', async (req, res) => {
-    try {
-        const notification = req.body;
-        const orderId = notification.order_id;
-        const statusResponse = await coreApi.transaction.notification(notification);
-
-        const transactionStatus = statusResponse.transaction_status;
-        const fraudStatus = statusResponse.fraud_status;
-
-        console.log(`Transaction notification received. Order ID: ${orderId}. Transaction status: ${transactionStatus}. Fraud status: ${fraudStatus}`);
-
-        // Verifikasi signature key
-        const signatureKey = notification.signature_key;
-        const orderId2 = notification.order_id;
-        const statusCode = notification.status_code;
-        const grossAmount = notification.gross_amount;
-        const serverKey = process.env.MIDTRANS_SERVER_KEY;
-        
-        const hash = crypto.createHash('sha512');
-        hash.update(orderId2 + statusCode + grossAmount + serverKey);
-        const expectedSignature = hash.digest('hex');
-
-        if (signatureKey !== expectedSignature) {
+        if (!order_id) {
             return res.status(400).json({
                 success: false,
-                message: 'Invalid signature key'
+                message: 'Order ID is required',
+                data: null
             });
         }
 
-        // Handle berbagai status transaksi
-        if (transactionStatus === 'capture') {
-            if (fraudStatus === 'challenge') {
-                // TODO: Set payment status to 'challenge'
-                console.log('Transaction is challenged');
-            } else if (fraudStatus === 'accept') {
-                // TODO: Set payment status to 'success'
-                console.log('Transaction is successful');
-            }
-        } else if (transactionStatus === 'settlement') {
-            // TODO: Set payment status to 'success'
-            console.log('Transaction is settled');
-        } else if (transactionStatus === 'deny') {
-            // TODO: Set payment status to 'denied'
-            console.log('Transaction is denied');
-        } else if (transactionStatus === 'cancel' || transactionStatus === 'expire') {
-            // TODO: Set payment status to 'cancelled'
-            console.log('Transaction is cancelled or expired');
-        } else if (transactionStatus === 'pending') {
-            // TODO: Set payment status to 'pending'
-            console.log('Transaction is pending');
-        }
-
-        res.status(200).json({
+        const statusResponse = await snap.transaction.status(order_id);
+        
+        res.json({
             success: true,
-            message: 'Notification processed successfully'
+            message: 'Transaction status retrieved',
+            data: {
+                transaction_status: statusResponse.transaction_status,
+                order_id: statusResponse.order_id,
+                gross_amount: statusResponse.gross_amount,
+                payment_type: statusResponse.payment_type,
+                transaction_time: statusResponse.transaction_time,
+                fraud_status: statusResponse.fraud_status
+            }
         });
 
+    } catch (error) {
+        console.error('Status check error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to check transaction status',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            data: null
+        });
+    }
+});
+
+app.post('/api/payment/notification', async (req, res) => {
+    try {
+        const notification = req.body;
+        
+        // Verify and process the notification
+        const statusResponse = await snap.transaction.notification(notification);
+        
+        console.log('Payment notification:', {
+            orderId: statusResponse.order_id,
+            status: statusResponse.transaction_status,
+            amount: statusResponse.gross_amount,
+            paymentType: statusResponse.payment_type
+        });
+
+        // TODO: Update your database based on the transaction status
+        
+        res.status(200).send('OK');
     } catch (error) {
         console.error('Notification error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to process notification',
-            error: error.message
-        });
+        res.status(500).send('Error processing notification');
     }
-});
-
-// Endpoint untuk cancel transaksi
-app.post('/api/payment/cancel/:orderId', async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        
-        const cancelResponse = await coreApi.transaction.cancel(orderId);
-        
-        res.json({
-            success: true,
-            data: cancelResponse
-        });
-
-    } catch (error) {
-        console.error('Cancel transaction error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to cancel transaction',
-            error: error.message
-        });
-    }
-});
-
-// Endpoint untuk refund
-app.post('/api/payment/refund/:orderId', async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        const { amount, reason } = req.body;
-        
-        const refundParams = {
-            refund_key: `refund-${orderId}-${Date.now()}`,
-            amount: amount,
-            reason: reason || 'Customer request'
-        };
-        
-        const refundResponse = await coreApi.transaction.refund(orderId, refundParams);
-        
-        res.json({
-            success: true,
-            data: refundResponse
-        });
-
-    } catch (error) {
-        console.error('Refund error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to refund transaction',
-            error: error.message
-        });
-    }
-});
-
-// Endpoint untuk mendapatkan list payment methods
-app.get('/api/payment/methods', (req, res) => {
-    res.json({
-        success: true,
-        data: {
-            credit_card: ['visa', 'mastercard', 'jcb'],
-            bank_transfer: ['bca', 'bni', 'bri', 'mandiri', 'permata'],
-            e_wallet: ['gopay', 'shopeepay', 'dana'],
-            over_the_counter: ['indomaret', 'alfamart'],
-            cardless_credit: ['akulaku']
-        }
-    });
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({
-        success: true,
-        message: 'Midtrans backend is running',
-        timestamp: new Date().toISOString()
-    });
 });
 
 // Error handling middleware
-app.use((error, req, res, next) => {
-    console.error('Global error handler:', error);
+app.use((err, req, res, next) => {
+    console.error(err.stack);
     res.status(500).json({
         success: false,
         message: 'Internal server error',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        error: process.env.NODE_ENV === 'development' ? err.message : undefined,
+        data: null
     });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-    res.status(404).json({
-        success: false,
-        message: 'Endpoint not found'
-    });
-});
-
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Midtrans backend server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
