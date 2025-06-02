@@ -32,7 +32,7 @@ function generateOrderId() {
 }
 
 // Endpoint untuk membuat transaksi (Snap Token)
-app.post('/api/payment/create-transaction', async (req, res) => {
+app.post('/api/payment/create', async (req, res) => {
     try {
         const { amount, customerDetails, itemDetails, customExpiry } = req.body;
 
