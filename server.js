@@ -80,7 +80,8 @@ app.post('/api/payment/create', async (req, res) => {
             data: {
                 token: transaction.token,
                 redirect_url: transaction.redirect_url,
-                order_id: orderId
+                order_id: orderId,
+                payment_type: transaction.payment_type || null
             }
         });
 
